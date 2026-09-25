@@ -1,0 +1,64 @@
+WEBSITE INTELLIGENCE - TERMS OF USE AND LICENSE
+
+Please read these terms carefully. By installing or using Website Intelligence
+("the Software"), you agree to them. If you do not agree, do not install or use
+the Software.
+
+
+1. WHAT THE SOFTWARE DOES
+
+Website Intelligence runs on your own computer. You enter a website address and
+it collects and displays PUBLICLY AVAILABLE technical information about that
+website - such as its DNS records, SSL certificate, HTTP headers, technologies,
+public pages, and similar data that any web browser or public service can see.
+It does not log in to anything, and it does not attempt to gain unauthorized
+access.
+
+
+2. ACCEPTABLE USE - YOUR RESPONSIBILITY
+
+You agree to use the Software lawfully and responsibly. In particular you WILL
+NOT use it to:
+
+   - attempt to access, or to gain access to, any system, account, or data you
+     are not authorized to access;
+   - place an unreasonable load on any website, or interfere with its normal
+     operation;
+   - violate the terms of service of any website, or any applicable law; or
+   - use any information it gathers to harm, harass, defraud, or impersonate
+     any person or organization.
+
+The optional "deep security checks" request a small number of common paths to
+report whether sensitive files are publicly exposed. Use that feature only on
+websites you own or are authorized to test. You are solely responsible for
+ensuring your use of the Software is lawful and authorized.
+
+
+3. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. Detection results, scores, and
+other findings are estimates and may be incomplete or inaccurate.
+
+
+4. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS AND CONTRIBUTORS OF THE
+SOFTWARE SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+5. INDEMNITY
+
+You agree to hold the authors and contributors harmless from any claim or
+demand arising out of your use of the Software or your breach of these terms.
+
+
+6. ACKNOWLEDGEMENT
+
+By clicking "I accept" and installing the Software, you confirm that you have
+read and understood these terms, that you will use the Software only for lawful
+and authorized analysis of public information, and that you accept full
+responsibility for your use of it.
