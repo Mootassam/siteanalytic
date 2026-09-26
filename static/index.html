@@ -180,6 +180,7 @@
   <label>Depth <input id="max_depth" type="number" value="2" min="0" max="5"></label>
   <label><input id="screenshots" type="checkbox" checked> Screenshots</label>
   <label title="HTTPS redirect, security.txt, version disclosure, and public exposure of sensitive files"><input id="deep" type="checkbox"> Deep security checks</label>
+  <label title="Passive OSINT: subdomains, certificate history, exposed ports & CVEs, infrastructure map, deep DNS, reputation, look-alike domains, exposures, trust score. Slower — uses public sources."><input id="recon" type="checkbox"> 🛰️ Deep intelligence</label>
   <span style="color:var(--dim)">· Analyzes only public information · runs locally</span>
 </div>
 
@@ -249,7 +250,7 @@ async function startScan(url){
   let r,j;
   try{
     r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({url,max_pages:+$('#max_pages').value,max_depth:+$('#max_depth').value,screenshots:$('#screenshots').checked,deep:$('#deep').checked})});
+      body:JSON.stringify({url,max_pages:+$('#max_pages').value,max_depth:+$('#max_depth').value,screenshots:$('#screenshots').checked,deep:$('#deep').checked,recon:$('#recon').checked})});
     j=await r.json();
   }catch(e){showErr('Could not reach the server.');$('#scanBtn').disabled=false;return;}
   if(!r.ok){showErr(j.error||'Failed to start');$('#scanBtn').disabled=false;return;}
@@ -281,6 +282,17 @@ async function poll(){
 const SECTIONS=[
   ['overview','◎ Overview',()=>''],
   ['findings','⚠️ Findings',r=>(r.findings||[]).filter(f=>f.severity!=='good').length],
+  ['trust','🛡️ Trust & risk',r=>r.trust?.score,'recon'],
+  ['graph','🕸️ Relationship map',r=>r.subdomains?.resolved,'recon'],
+  ['subdomains','🌐 Subdomains',r=>r.subdomains?.resolved,'recon'],
+  ['infra','🗺️ Infrastructure',r=>r.infrastructure?.ip_count,'recon'],
+  ['ports','🔌 Ports & CVEs',r=>r.passive_ports?.vuln_count||r.passive_ports?.hosts?.length,'recon'],
+  ['exposure','🔓 Exposures',r=>((r.secrets?.count||0)+(r.cloud_storage?.count||0)+(r.exposed_config?.count||0))||'','recon'],
+  ['wordpress','⬛ WordPress',r=>r.wordpress?.is_wordpress?(r.wordpress.plugins?.length||1):0,'recon'],
+  ['certs','📜 Cert history',r=>r.cert_history?.total,'recon'],
+  ['dnsdeep','🧬 Deep DNS',r=>r.dns_deep?.dkim_selectors?.length||(r.dns_deep?1:0),'recon'],
+  ['typo','🎭 Look-alikes',r=>r.typosquats?.count,'recon'],
+  ['pivots','🔎 Owner pivots',r=>r.pivots?.count,'recon'],
   ['domain','🌐 Domain & DNS',r=>Object.values(r.dns?.records||{}).flat().length],
   ['ssl','🔒 SSL / TLS',r=>r.ssl?.available?1:0],
   ['http','📡 HTTP & Headers',r=>Object.keys(r.headers||{}).length],
@@ -309,8 +321,10 @@ function gradeColor(g){return ({'A+':'good','A':'good','B':'good','C':'warn','D'
 function scoreColor(n){return n>=80?'good':(n>=60?'warn':'bad');}
 function renderStrip(){
   const d=REPORT.dna||{}, http=REPORT.http||{}, sc=REPORT.score||{};
+  const tr=REPORT.trust||{};
   const items=[
     ['Score',(sc.overall??'—')+' · '+(sc.grade||''),scoreColor(sc.overall),true],
+    ...(tr.score!=null?[['Trust',tr.score+' · '+(tr.verdict||''),scoreColor(tr.score),true]]:[]),
     ['Status',(http.status||'—'),http.status<400?'good':'bad'],
     ['Server',d.server||'—'],
     ['CDN',d.cdn||'—'],
@@ -332,11 +346,17 @@ function renderToolbar(){
     el('button',{class:'btn ghost sm',onclick:dl('html')},'⬇ HTML'),
   );
 }
+function hasRecon(r){return !!(r&&(r.subdomains||r.trust||r.passive_ports||r.dns_deep));}
 function renderNav(){
-  $('#nav').replaceChildren(...SECTIONS.map(([id,label,cnt])=>{
-    const c=cnt(REPORT);
+  const secs=SECTIONS.filter(([id,label,cnt,flag])=>{
+    if(flag==='recon'&&!hasRecon(REPORT))return false;
+    if(id==='wordpress'&&!REPORT.wordpress?.is_wordpress)return false;
+    return true;
+  });
+  $('#nav').replaceChildren(...secs.map(([id,label,cnt])=>{
+    let c;try{c=cnt(REPORT);}catch(e){c='';}
     return el('button',{class:id===SECTION?'on':'',onclick:()=>{SECTION=id;renderNav();renderSection(id);window.scrollTo({top:120,behavior:'smooth'})}},
-      label, c?el('span',{class:'cnt'},String(c)):null);
+      label, (c!=null&&c!=='')?el('span',{class:'cnt'},String(c)):null);
   }));
 }
 function card(title,desc,...body){return el('div',{class:'card'},el('h2',{},title),desc?el('div',{class:'desc'},desc):null,...body);}
@@ -351,7 +371,8 @@ function tableFrom(cols,rows,opts={}){
 
 function renderSection(id){
   const r=REPORT, p=$('#panel');
-  const fn={overview,findings:findingsSec,domain,ssl:sslSec,http:httpSec,tech,performance:perfSec,seo,security,contacts,crawl,assets,js:jsSec,apis,links,files,external,sitemap,shots,history}[id];
+  const fn={overview,findings:findingsSec,domain,ssl:sslSec,http:httpSec,tech,performance:perfSec,seo,security,contacts,crawl,assets,js:jsSec,apis,links,files,external,sitemap,shots,history,
+    trust:trustSec,graph:graphSec,subdomains:subdomainsSec,infra:infraSec,ports:portsSec,exposure:exposureSec,wordpress:wordpressSec,certs:certsSec,dnsdeep:dnsDeepSec,typo:typoSec,pivots:pivotsSec}[id];
   p.replaceChildren(fn?fn(r):el('div',{class:'empty'},'—'));
 }
 
@@ -397,6 +418,18 @@ function overview(r){
     kids.push(card('✅ Health','',el('div',{class:'finding sev-good'},el('div',{class:'ic'},'✓'),
       el('div',{},el('div',{class:'ttl'},'No critical issues found'),el('div',{class:'dt'},'This site passes the key security, SEO and best-practice checks.')))));
   }
+  // trust summary (deep intelligence)
+  const t=r.trust||{};
+  if(t.score!=null){
+    const tc=scoreColor(t.score);
+    kids.push(card('🛡️ Trust & risk',`Legitimacy assessment from public signals`,
+      el('div',{class:'flex',style:'gap:14px;align-items:center'},
+        el('span',{class:'badge-lg',style:`background:var(--panel2);color:var(--${tc});font-size:20px;padding:8px 16px`},t.score+' / 100'),
+        el('span',{class:'tag '+(t.score>=60?'good':'bad')},t.verdict||''),
+        el('button',{class:'btn ghost sm',onclick:()=>{SECTION='trust';renderNav();renderSection('trust')}},'Details →')),
+      el('div',{class:'flex',style:'margin-top:12px;gap:6px'},
+        ...(t.reasons||[]).filter(x=>x.impact<0).slice(0,4).map(x=>el('span',{class:'tag bad'},x.reason.slice(0,42))))));
+  }
   const d=r.dna||{};
   const dnaPairs=[['Domain',d.domain],['IP address',d.ip],['ASN',d.asn],['Organization',d.org],
     ['Server',d.server],['CDN',d.cdn],['Hosting',d.hosting],['CMS / Platform',d.cms],
@@ -405,7 +438,10 @@ function overview(r){
     ['Email security',d.email_grade],['Security grade',d.security_grade],
     ['Page weight',d.page_weight?d.page_weight+' MB':'—'],
     ['Registrar',d.registrar],['Domain expires',fmtDate(d.expires)],
-    ['Pages found',d.pages_found],['Assets',d.assets_found],['External domains',d.external_domains],['API references',d.api_references]];
+    ['Pages found',d.pages_found],['Assets',d.assets_found],['External domains',d.external_domains],['API references',d.api_references],
+    ...(d.subdomains!=null?[['Subdomains (live)',d.subdomains]]:[]),
+    ...(d.open_ports!=null?[['Open ports',d.open_ports]]:[]),
+    ...(d.trust!=null?[['Trust score',d.trust+' / 100']]:[])];
   kids.push(card('🧬 Website DNA','A single technical fingerprint of this site.',kv(dnaPairs)));
   if(r.screenshots?.desktop)
     kids.push(card('📸 Preview','',el('div',{class:'shot'},el('img',{src:r.screenshots.desktop,alt:'desktop screenshot'}))));
@@ -693,6 +729,220 @@ function history(r){
       ['Closest snapshot',h.closest?el('a',{href:h.closest.url,target:'_blank',rel:'noopener'},h.closest.timestamp):'—']]),
     (h.timeline||[]).length?el('div',{style:'margin-top:14px'},el('h3',{class:'sec'},'Recent snapshot dates'),
       el('div',{class:'flex'},...(h.timeline||[]).map(d=>el('span',{class:'tag'},d)))):null);
+}
+
+/* ====================== DEEP INTELLIGENCE (recon) ====================== */
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function okRow(ok,label,val,goodLabel,badLabel){
+  return el('div',{class:'flex',style:'gap:10px;padding:8px 0;border-bottom:1px solid var(--line)'},
+    el('span',{class:'pill '+(ok?'ok':'no')},ok?'✓':'✗'),
+    el('b',{style:'font-size:13px;min-width:120px'},label),
+    el('span',{class:'mono',style:'color:var(--muted);font-size:12px;word-break:break-all'},
+      val||(ok?(goodLabel||'enabled'):(badLabel||'not set'))));
+}
+const SUBTYPE={staging:'warn',internal:'bad',mail:'cyan',service:'violet',public:'muted'};
+
+function trustSec(r){
+  const t=r.trust||{};
+  if(t.score==null)return card('🛡️ Trust & risk','',el('div',{class:'empty'},'Run with Deep intelligence enabled.'));
+  const c=scoreColor(t.score);
+  const ring=el('div',{class:'ring',style:`--p:${t.score};--c:var(--${c})`},
+    el('div',{class:'inner'},el('div',{class:'num',style:`color:var(--${c})`},t.score),
+      el('div',{class:'gr',style:`color:var(--${c})`},t.verdict||''),el('div',{class:'lbl'},'Trust score')));
+  const reasons=(t.reasons||[]).map(x=>el('div',{class:'finding sev-'+(x.impact<=-20?'critical':x.impact<0?'warning':'good')},
+    el('div',{class:'ic'},x.impact<0?'!':'✓'),
+    el('div',{style:'min-width:0'},el('div',{class:'ttl'},x.reason)),
+    el('div',{class:'cat',style:x.impact<0?'color:var(--bad)':'color:var(--good)'},x.impact<0?x.impact:'ok')));
+  return card('🛡️ Trust & legitimacy assessment','A weighted score from domain age, HTTPS, reputation, exposures, known CVEs and contactability — useful for spotting risky or fraudulent sites.',
+    el('div',{class:'scorewrap'},ring,el('div',{style:'width:100%'},...reasons)),
+    el('div',{class:'desc',style:'margin-top:14px'},'⚠ A guide from public signals, not a verdict — always judge a site in context.'));
+}
+
+function graphSec(r){
+  const cats=[];
+  const sd=r.subdomains||{};
+  if(sd.resolved)cats.push({name:'Subdomains',color:'#6c8cff',count:sd.resolved,leaves:(sd.records||[]).slice(0,5).map(x=>x.subdomain.replace('.'+r.host,''))});
+  const inf=r.infrastructure||{};
+  if((inf.providers||[]).length)cats.push({name:'Hosting',color:'#2fd8c8',count:inf.providers.length,leaves:inf.providers.slice(0,3).map(p=>p[0].replace(/\s*[-,].*/,'').slice(0,14))});
+  const ips=(r.ip&&r.ip.ipv4)||[];
+  if(ips.length)cats.push({name:'IPs',color:'#a78bfa',count:inf.ip_count||ips.length,leaves:ips.slice(0,3)});
+  const pv=r.pivots||{};
+  if((pv.identifiers||[]).length)cats.push({name:'Identifiers',color:'#ffb547',count:pv.count,leaves:pv.identifiers.slice(0,3).map(i=>i.id)});
+  const soc=(r.contacts&&r.contacts.socials)||[];
+  if(soc.length)cats.push({name:'Social',color:'#2fd39a',count:soc.length,leaves:soc.slice(0,4).map(s=>s.platform)});
+  const ts=r.typosquats||{};
+  if(ts.count)cats.push({name:'Look-alikes',color:'#ff6b7d',count:ts.count,leaves:(ts.registered||[]).slice(0,3).map(d=>d.domain)});
+  if(!cats.length)return card('🕸️ Relationship map','',el('div',{class:'empty'},'Not enough data to map.'));
+  const W=960,H=560,cx=W/2,cy=H/2,Rh=168,Rl=104;
+  let svg=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" font-family="system-ui">`;
+  const N=cats.length;
+  cats.forEach((cat,i)=>{
+    const ang=(-90+i*360/N)*Math.PI/180;
+    const hx=cx+Rh*Math.cos(ang),hy=cy+Rh*Math.sin(ang);
+    svg+=`<line x1="${cx}" y1="${cy}" x2="${hx}" y2="${hy}" stroke="${cat.color}" stroke-width="2" opacity=".5"/>`;
+    (cat.leaves||[]).forEach((lf,j)=>{
+      const nL=cat.leaves.length, spread=44, base=(nL-1)/2;
+      const la=ang+((j-base)*spread/Rl);
+      const lx=hx+Rl*Math.cos(la),ly=hy+Rl*Math.sin(la);
+      const anchor=lx<cx-20?'end':(lx>cx+20?'start':'middle');
+      svg+=`<line x1="${hx}" y1="${hy}" x2="${lx}" y2="${ly}" stroke="${cat.color}" stroke-width="1" opacity=".25"/>`;
+      svg+=`<circle cx="${lx}" cy="${ly}" r="4" fill="${cat.color}"/>`;
+      svg+=`<text x="${lx+(anchor==='end'?-7:anchor==='start'?7:0)}" y="${ly+3}" fill="#cdd6e6" font-size="11" text-anchor="${anchor}">${esc(String(lf).slice(0,20))}</text>`;
+    });
+    svg+=`<circle cx="${hx}" cy="${hy}" r="30" fill="${cat.color}22" stroke="${cat.color}" stroke-width="1.5"/>`;
+    svg+=`<text x="${hx}" y="${hy-1}" fill="#fff" font-size="15" font-weight="700" text-anchor="middle">${cat.count}</text>`;
+    svg+=`<text x="${hx}" y="${hy+13}" fill="${cat.color}" font-size="9.5" text-anchor="middle">${esc(cat.name)}</text>`;
+  });
+  svg+=`<circle cx="${cx}" cy="${cy}" r="46" fill="url(#g)" stroke="#6c8cff" stroke-width="2"/>`;
+  svg+=`<defs><radialGradient id="g"><stop offset="0" stop-color="#2a3a66"/><stop offset="1" stop-color="#141c30"/></radialGradient></defs>`;
+  const label=(r.host||'').length>18?(r.host.slice(0,16)+'…'):(r.host||'domain');
+  svg+=`<text x="${cx}" y="${cy+4}" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">${esc(label)}</text></svg>`;
+  const wrap=el('div',{});wrap.innerHTML=svg;
+  return card('🕸️ Relationship map','How this domain connects to its subdomains, infrastructure, tracking identifiers and social presence — the OSINT pivot graph.',wrap);
+}
+
+function subdomainsSec(r){
+  const s=r.subdomains||{};
+  if(!s.records)return card('🌐 Subdomains','',el('div',{class:'empty'},'Enable Deep intelligence.'));
+  const kids=[card('🌐 Subdomain discovery',`${s.resolved} live of ${s.total_found} found via Certificate Transparency + DNS`,
+    kv([['Found (CT + DNS)',s.total_found],['Live / resolvable',s.resolved],['Unique IPs',(s.unique_ips||[]).length],
+      ['Staging / internal',(s.staging||[]).length||'0']]))];
+  kids.push(card('📋 Subdomains',`${(s.records||[]).length} shown`,
+    tableFrom([{label:'Subdomain',render:x=>el('span',{class:'mono'},x.subdomain)},
+      {label:'Type',render:x=>T(x.type,'tag '+(SUBTYPE[x.type]||'muted'))},
+      {label:'IP / CNAME',render:x=>el('span',{class:'mono',style:'color:var(--muted)'},(x.ips||[]).join(', ')||x.cname||'—')},
+      {label:'',render:x=>x.live?T('live','good'):T('cname','muted')}],s.records,{empty:'No subdomains resolved.'})));
+  return el('div',{},...kids);
+}
+
+function infraSec(r){
+  const inf=r.infrastructure||{};
+  if(!inf.ips)return card('🗺️ Infrastructure','',el('div',{class:'empty'},'Enable Deep intelligence.'));
+  const kids=[card('🗺️ Infrastructure map',`${inf.ip_count} IPs across ${(inf.providers||[]).length} provider(s)`,
+    el('h3',{class:'sec'},'Hosting providers'),
+    el('div',{class:'flex'},...(inf.providers||[]).map(p=>el('span',{class:'tag'},`${p[0]} ×${p[1]}`))||[]),
+    el('h3',{class:'sec'},'Countries'),
+    el('div',{class:'flex'},...(inf.countries||[]).map(c=>el('span',{class:'tag'},`${c[0]} ×${c[1]}`))))];
+  kids.push(card('📍 IP addresses',`${(inf.ips||[]).length} mapped`,
+    tableFrom([{label:'IP',key:'ip',cls:'mono'},{label:'ASN',key:'asn',cls:'mono'},
+      {label:'Organization',key:'org'},{label:'Country',key:'country'},
+      {label:'Also hosts',render:x=>x.shared_count?el('span',{title:(x.hosts_here||[]).join('\n')},x.shared_count+' host(s)'):'—'}],
+      inf.ips,{empty:'No IPs mapped.'})));
+  return el('div',{},...kids);
+}
+
+function portsSec(r){
+  const p=r.passive_ports||{};
+  if(!p.available)return card('🔌 Ports & CVEs','',el('div',{class:'empty'},'No exposed-service data (enable Deep intelligence).'));
+  const kids=[card('🔌 Exposed services & known vulnerabilities',p.source||'',
+    kv([['Hosts seen',(p.hosts||[]).length],['Open ports (total)',(p.hosts||[]).reduce((a,h)=>a+(h.ports||[]).length,0)],
+      ['Risky ports',(p.risky_ports||[]).length],['Known CVEs',p.vuln_count||0]]))];
+  if((p.risky_ports||[]).length)
+    kids.push(card('⚠️ Risky exposed ports','',tableFrom([
+      {label:'IP',key:'ip',cls:'mono'},{label:'Port',render:x=>T(x.port+(x.name?' · '+x.name:''),'tag bad')},
+      {label:'Why it matters',key:'why'}],p.risky_ports)));
+  (p.hosts||[]).forEach(h=>{
+    if(!(h.ports||[]).length&&!(h.vulns||[]).length)return;
+    kids.push(card('🖥️ '+h.ip,(h.hostnames||[]).slice(0,4).join(', '),
+      el('div',{class:'flex',style:'margin-bottom:10px'},...(h.port_labels||[]).map(pl=>
+        el('span',{class:'tag '+(pl.risky?'bad':''),title:pl.why||''},pl.port+(pl.name?' '+pl.name:'')))),
+      (h.cpes||[]).length?el('div',{style:'margin-bottom:8px'},el('span',{class:'muted',style:'font-size:12px'},'Software: '),
+        ...(h.cpes||[]).slice(0,10).map(c=>el('span',{class:'tag',style:'font-size:11px'},c.replace('cpe:2.3:','').slice(0,40)))):null,
+      (h.vulns||[]).length?el('div',{},el('span',{class:'muted',style:'font-size:12px'},'Known CVEs: '),
+        ...(h.vulns||[]).slice(0,30).map(v=>el('a',{class:'tag bad',href:'https://nvd.nist.gov/vuln/detail/'+v,target:'_blank',rel:'noopener'},v))):null));
+  });
+  return el('div',{},...kids);
+}
+
+function exposureSec(r){
+  const sec=r.secrets||{},cs=r.cloud_storage||{},ec=r.exposed_config||{};
+  const kids=[el('div',{class:'finding sev-info',style:'margin-bottom:14px'},el('div',{class:'ic'},'i'),
+    el('div',{},el('div',{class:'ttl'},'Reported so the owner can fix it'),
+      el('div',{class:'dt'},'Secrets are shown masked and are never used or stored. Everything here is already publicly served by the site.')))];
+  kids.push(card('🔑 Exposed secrets in public code',`${sec.count||0} found`,
+    (sec.findings||[]).length?tableFrom([{label:'Type',render:x=>T(x.type,'tag bad')},
+      {label:'Value (masked)',render:x=>el('span',{class:'mono'},x.masked)},
+      {label:'Where',render:x=>el('span',{class:'mono',style:'color:var(--dim)'},host(x.where)||x.where)}],sec.findings):
+      el('div',{class:'finding sev-good'},el('div',{class:'ic'},'✓'),el('div',{},el('div',{class:'ttl'},'No exposed secrets found in the scanned code')))));
+  kids.push(card('🪣 Cloud storage buckets',`${cs.count||0} referenced`,
+    (cs.buckets||[]).length?tableFrom([{label:'Provider',render:x=>T(x.provider,'tag')},
+      {label:'Bucket',render:x=>el('a',{href:x.url,target:'_blank',rel:'noopener',class:'mono'},x.bucket)},
+      {label:'Access',render:x=>x.public_listable?T('⚠ publicly listable','bad'):T('not listable','good')}],cs.buckets):
+      el('div',{class:'empty'},'No cloud storage buckets referenced.')));
+  kids.push(card('⚙️ Exposed configuration / state',`${ec.count||0} found`,
+    (ec.items||[]).length?tableFrom([{label:'Path',render:x=>el('span',{class:'mono'},x.path)},
+      {label:'Type',key:'type'},{label:'Note',key:'note'}],ec.items):
+      el('div',{class:'finding sev-good'},el('div',{class:'ic'},'✓'),el('div',{},el('div',{class:'ttl'},'No public config/state files exposed')))));
+  return el('div',{},...kids);
+}
+
+function wordpressSec(r){
+  const w=r.wordpress||{};
+  if(!w.is_wordpress)return card('⬛ WordPress','',el('div',{class:'empty'},'Not a WordPress site.'));
+  const kids=[card('⬛ WordPress',`${w.version?'version '+w.version:'version unknown'}${w.theme?' · theme: '+w.theme:''}`,
+    kv([['Version',w.version||'unknown'],['Theme',w.theme||'—'],
+      ['Plugins detected',(w.plugins||[]).length],['Authors exposed (REST)',w.rest_users_exposed?(w.users||[]).length+' — restrict /wp-json':'no'],
+      ['XML-RPC',w.xmlrpc?'enabled (consider disabling)':'disabled / not found']]))];
+  if((w.users||[]).length)
+    kids.push(card('👤 Public author accounts',`${w.users.length} discoverable via the public REST API — restrict this endpoint`,
+      tableFrom([{label:'Name',key:'name'},{label:'Login slug',key:'slug',cls:'mono'}],w.users)));
+  if((w.plugins||[]).length)
+    kids.push(card('🧩 Plugins',`${w.plugins.length} detected from public asset URLs`,
+      tableFrom([{label:'Plugin',key:'name',cls:'mono'},{label:'Version',render:x=>x.version||'—'}],w.plugins)));
+  return el('div',{},...kids);
+}
+
+function certsSec(r){
+  const c=r.cert_history||{};
+  if(!c.available)return card('📜 Certificate history','',el('div',{class:'empty'},'No Certificate Transparency data found.'));
+  return el('div',{},
+    card('📜 Certificate history',`${c.total} certificates ever issued (Certificate Transparency)`,
+      kv([['Total certificates',c.total],['First issued',c.first_seen],['Last issued',c.last_seen]]),
+      el('h3',{class:'sec'},'Certificate authorities used'),
+      el('div',{class:'flex'},...(c.issuers||[]).map(i=>el('span',{class:'tag'},`${i[0]} ×${i[1]}`)))),
+    card('📋 Recent certificates',`${(c.certs||[]).length} shown`,
+      tableFrom([{label:'Issued',key:'not_before',cls:'mono'},{label:'Expires',key:'not_after',cls:'mono'},
+        {label:'Issuer',key:'issuer'},{label:'Names',render:x=>el('span',{class:'mono',style:'font-size:11px;color:var(--muted)'},x.names)}],c.certs)));
+}
+
+function dnsDeepSec(r){
+  const d=r.dns_deep||{};
+  const kids=[card('🧬 Deep DNS & email transport security',null,
+    okRow(d.dnssec,'DNSSEC',null,'signed','not enabled'),
+    okRow(d.mta_sts,'MTA-STS',null,'policy present','not set'),
+    okRow(d.tls_rpt,'TLS reporting',null,'enabled','not set'),
+    okRow(d.bimi,'BIMI (brand logo)',null,'published','not set'),
+    okRow((d.caa||[]).length>0,'CAA records',(d.caa||[]).join(', ')||null,'set','none — any CA may issue'),
+    okRow((d.dkim_selectors||[]).length>0,'DKIM selectors',(d.dkim_selectors||[]).join(', ')||null,'found','none found'))];
+  if((d.takeover_risks||[]).length)
+    kids.push(card('⚠️ Subdomain takeover risk',`${d.takeover_risks.length} dangling record(s) — review urgently`,
+      tableFrom([{label:'Subdomain',key:'subdomain',cls:'mono'},{label:'Points to',key:'provider'},
+        {label:'CNAME',key:'cname',cls:'mono'}],d.takeover_risks)));
+  return el('div',{},...kids);
+}
+
+function typoSec(r){
+  const t=r.typosquats||{};
+  if(t.count==null)return card('🎭 Look-alike domains','',el('div',{class:'empty'},'Enable Deep intelligence.'));
+  return card('🎭 Look-alike / typosquat domains',`${t.count} registered of ${t.checked} checked · ${t.with_mail} can send email`,
+    (t.registered||[]).length?tableFrom([{label:'Domain',render:x=>el('a',{href:'http://'+x.domain,target:'_blank',rel:'noopener',class:'mono'},x.domain)},
+      {label:'Resolves to',render:x=>el('span',{class:'mono',style:'color:var(--muted)'},(x.ips||[]).join(', '))},
+      {label:'Email',render:x=>x.has_mx?T('⚠ has mail (phishing risk)','bad'):T('no mail','muted')}],t.registered):
+      el('div',{class:'finding sev-good'},el('div',{class:'ic'},'✓'),el('div',{},el('div',{class:'ttl'},'No look-alike domains are registered'))));
+}
+
+function pivotsSec(r){
+  const p=r.pivots||{};
+  const kids=[card('🔎 Owner-research pivots','Shared identifiers that can link this site to others by the same owner (for competitor / ownership research).',
+    (p.identifiers||[]).length?tableFrom([{label:'Type',render:x=>T(x.type,'tag')},{label:'Identifier',key:'id',cls:'mono'}],p.identifiers):
+      el('div',{class:'empty'},'No analytics/ad identifiers found in the page.'))];
+  if(p.favicon&&p.favicon.shodan_hash!=null)
+    kids.push(card('🖼️ Favicon fingerprint','',kv([['Favicon',el('a',{href:p.favicon.url,target:'_blank',rel:'noopener',class:'mono'},p.favicon.url)],
+      ['Shodan hash',el('span',{class:'mono'},String(p.favicon.shodan_hash))]])));
+  if((p.research_links||[]).length)
+    kids.push(card('🔗 Pivot searches','Open these to find other sites sharing this fingerprint.',
+      el('div',{class:'flex'},...p.research_links.map(l=>el('a',{class:'tag',href:l.url,target:'_blank',rel:'noopener'},l.label)))));
+  return el('div',{},...kids);
 }
 
 /* ---------- recent scans + compare ---------- */

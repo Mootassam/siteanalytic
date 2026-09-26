@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import analyzers as A
 import intel
+import recon as R
 
 
 def _now():
@@ -156,13 +157,45 @@ def run_scan(url: str, opts: dict | None = None, progress=None) -> dict:
         report["deep"] = guard("deep", lambda: A.deep_checks(origin, home, True)) or {}
         step("deep", 86)
 
-    # 7) browser probe: performance + screenshots
+    # 7) deep intelligence / recon (opt-in): passive OSINT from public sources
+    if opts.get("recon"):
+        def rp(pct, msg):
+            if progress:
+                progress(pct, "recon", msg)
+        rp(87, "subdomains · certificate transparency")
+        subs = guard("subdomains", lambda: R.subdomains(host)) or {"records": [], "unique_ips": [], "ip_index": {}}
+        report["subdomains"] = subs
+        report["cert_history"] = guard("cert_history", lambda: R.cert_history(host)) or {"available": False}
+        rp(89, "exposed services · known CVEs")
+        all_ips = list(dict.fromkeys((report["ip"].get("ipv4") or []) + subs.get("unique_ips", [])))
+        ports = guard("ports", lambda: R.passive_ports(all_ips)) or {"available": False}
+        report["passive_ports"] = ports
+        report["infrastructure"] = guard("infra", lambda: R.infrastructure(subs, report["ip"].get("ipv4") or [], ports)) or {"available": False}
+        rp(91, "deep DNS · takeover · reputation")
+        report["dns_deep"] = guard("dns_deep", lambda: R.dns_deep(host, subs)) or {}
+        mx_ips = guard("mx_ips", lambda: mx_addresses(dns.get("records", {}))) or []
+        report["reputation"] = guard("reputation", lambda: R.reputation(report["ip"].get("ipv4") or [], mx_ips)) or {}
+        rp(92, "look-alike domains · owner pivots")
+        report["typosquats"] = guard("typosquats", lambda: R.typosquats(host)) or {}
+        report["pivots"] = guard("pivots", lambda: R.pivots(origin, html, dns.get("records", {}))) or {}
+        rp(93, "platform · versions · exposures")
+        report["wordpress"] = guard("wordpress", lambda: A.wordpress_scan(origin, html)) or {"is_wordpress": False}
+        report["tech_cve"] = guard("tech_cve", lambda: A.tech_cve(report["technologies"])) or {}
+        report["secrets"] = guard("secrets", lambda: A.secret_scan(origin, html, scripts)) or {}
+        report["cloud_storage"] = guard("cloud", lambda: A.cloud_storage(origin, html, report["assets"].get("items", []))) or {}
+        report["exposed_config"] = guard("config", lambda: A.exposed_config(origin)) or {}
+        report["trust"] = guard("trust", lambda: R.trust_score(report)) or {}
+        step("recon", 94)
+
+    # 8) browser probe: performance + screenshots
     if progress:
-        progress(88, "browser", "measuring performance · screenshots")
+        progress(95, "browser", "measuring performance · screenshots")
     probe = guard("browser", lambda: browser_probe(final_url, opts)) or {}
     report["performance"] = probe.get("performance", {})
     report["screenshots"] = probe.get("screenshots", {"available": False})
-    step("browser", 94)
+    step("browser", 97)
+    if opts.get("recon") and report.get("trust"):
+        report["trust"] = guard("trust", lambda: R.trust_score(report)) or report["trust"]
 
     # 8) DNA + score + findings
     report["dna"] = build_dna(report)
@@ -205,6 +238,16 @@ def rdap_domain(host: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Summaries
 # --------------------------------------------------------------------------- #
+def mx_addresses(records: dict) -> list[str]:
+    """Resolve MX hostnames to IPv4 so reputation can check the mail servers."""
+    ips = []
+    for r in records.get("MX", [])[:5]:
+        host = r["data"].split()[-1].rstrip(".") if r.get("data") else ""
+        if host:
+            ips += [a["data"] for a in intel.doh(host, "A")]
+    return [ip for ip in dict.fromkeys(ips) if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip)]
+
+
 def link_summary(links: list[dict]) -> dict:
     by = {"internal": [], "external": [], "mailto": [], "tel": [], "anchor": []}
     for l in links:
@@ -284,6 +327,9 @@ def build_dna(r: dict) -> dict:
         "email_grade": r.get("email_security", {}).get("grade", "—"),
         "performance": r.get("performance", {}).get("score", "—"),
         "page_weight": r.get("performance", {}).get("weight_mb"),
+        "subdomains": r.get("subdomains", {}).get("resolved") if r.get("subdomains") else None,
+        "open_ports": sum(len(h.get("ports", [])) for h in r.get("passive_ports", {}).get("hosts", [])) or None,
+        "trust": r.get("trust", {}).get("score") if r.get("trust") else None,
     }
 
 
@@ -386,8 +432,55 @@ def build_findings(r: dict) -> list[dict]:
     if (perf.get("weight_mb") or 0) > 3:
         add("info", "Performance", f"Heavy page: {perf.get('weight_mb')} MB")
 
-    for e in r.get("errors", []):
-        pass
+    # ---- deep intelligence (recon) findings ----
+    sec = r.get("secrets", {})
+    if sec.get("count"):
+        add("critical", "Exposure", f"{sec['count']} secret(s) exposed in public code",
+            ", ".join(sorted({f['type'] for f in sec.get('findings', [])})))
+    cs = r.get("cloud_storage", {})
+    for b in cs.get("buckets", []):
+        if b.get("public_listable"):
+            add("critical", "Exposure", f"Public cloud bucket is listable: {b['bucket']}", b.get("provider", ""))
+    dd = r.get("dns_deep", {})
+    for tk in dd.get("takeover_risks", []):
+        add("critical", "Takeover", f"Possible subdomain takeover: {tk['subdomain']}",
+            f"dangling CNAME → {tk['provider']} ({tk['cname']})")
+    rep = r.get("reputation", {})
+    if rep.get("listed"):
+        add("critical", "Reputation", f"IP on {len(rep.get('listings', []))} DNS blocklist(s)",
+            ", ".join(sorted({x['blocklist'] for x in rep.get('listings', [])})))
+    pp = r.get("passive_ports", {})
+    if pp.get("vuln_count"):
+        add("warning", "Vulnerabilities", f"{pp['vuln_count']} known CVE(s) on exposed services",
+            ", ".join(pp.get("vuln_ids", [])[:8]))
+    for rk in pp.get("risky_ports", [])[:6]:
+        add("warning", "Exposure", f"Risky port {rk['port']} ({rk.get('name','')}) open on {rk['ip']}", rk.get("why", ""))
+    tv = r.get("tech_cve", {})
+    for o in tv.get("outdated", []):
+        add("warning", "Vulnerabilities", f"{o['name']} {o['version']} is outdated (fix ≥ {o['fixed_in']})", o["advisory"])
+    ec = r.get("exposed_config", {})
+    for it in ec.get("items", []):
+        add("warning", "Exposure", f"Public config exposed: {it['path']}", it.get("note", ""))
+    wp = r.get("wordpress", {})
+    if wp.get("is_wordpress"):
+        if wp.get("rest_users_exposed"):
+            add("info", "WordPress", f"{len(wp.get('users', []))} usernames exposed via REST API",
+                "Restrict /wp-json/wp/v2/users")
+        if wp.get("xmlrpc"):
+            add("info", "WordPress", "XML-RPC is enabled", "Disable if unused (brute-force / pingback abuse)")
+    subs = r.get("subdomains", {})
+    if subs.get("staging"):
+        add("info", "Exposure", f"{len(subs['staging'])} staging/internal subdomain(s) publicly resolvable",
+            ", ".join(subs["staging"][:6]))
+    if r.get("dns_deep") and not r["dns_deep"].get("dnssec"):
+        add("info", "DNS", "DNSSEC is not enabled")
+    ts = r.get("typosquats", {})
+    if ts.get("with_mail"):
+        add("warning", "Brand", f"{ts['with_mail']} look-alike domain(s) can send email (phishing risk)",
+            ", ".join(d["domain"] for d in ts.get("registered", []) if d.get("has_mx"))[:200])
+    elif ts.get("count"):
+        add("info", "Brand", f"{ts['count']} look-alike domain(s) are registered")
+
     order = {"critical": 0, "warning": 1, "info": 2}
     good = not any(x["severity"] in ("critical", "warning") for x in f)
     if good:

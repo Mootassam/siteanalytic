@@ -12,6 +12,11 @@ FROZEN = bool(getattr(sys, "frozen", False))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def is_installed() -> bool:
+    """Installed copy (bundled signed runtime) — marked by an `.installed` file."""
+    return os.path.isfile(os.path.join(HERE, ".installed"))
+
+
 def bundle_dir() -> str:
     if FROZEN:
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
@@ -22,7 +27,7 @@ def data_dir() -> str:
     override = os.environ.get("WEBSITE_INTEL_DATA")
     if override:
         d = override
-    elif FROZEN:
+    elif FROZEN or is_installed():
         docs = os.path.join(os.path.expanduser("~"), "Documents")
         base = docs if os.path.isdir(docs) else (os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"))
         d = os.path.join(base, "Website Intelligence")

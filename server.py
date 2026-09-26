@@ -131,6 +131,7 @@ def api_scan():
         "max_depth": max(0, min(5, int(data.get("max_depth", 2) or 2))),
         "screenshots": bool(data.get("screenshots", True)),
         "deep": bool(data.get("deep", False)),
+        "recon": bool(data.get("recon", False)),
     }
     scan_id = uuid.uuid4().hex[:12]
     sc = Scan(scan_id, url, opts)
@@ -249,8 +250,64 @@ td{{border:1px solid #ccc;padding:6px 10px}}h1{{font-size:22px}}</style>
 <h2>Technologies</h2><ul>{techs}</ul>"""
 
 
+def _already_running(port):
+    import json as _json
+    import urllib.request
+    import webbrowser
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/scans", timeout=1.2) as r:
+            _json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return False
+    if os.environ.get("WI_NO_BROWSER") != "1":
+        webbrowser.open(f"http://127.0.0.1:{port}")
+    return True
+
+
+def _pick_port(preferred):
+    import socket
+    for p in [preferred] + list(range(preferred + 1, preferred + 20)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                return p
+    return preferred
+
+
+def _redirect_logs():
+    try:
+        f = open(os.path.join(data_dir(), "website-intel.log"), "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = f
+    except Exception:
+        class _N:
+            def write(self, *a):
+                pass
+
+            def flush(self):
+                pass
+        sys.stdout = sys.stderr = _N()
+
+
 if __name__ == "__main__":
+    from app_paths import is_installed
+    installed = is_installed() or getattr(sys, "frozen", False)
+    if installed and sys.stdout is None:
+        _redirect_logs()
+    if installed and not os.environ.get("PORT"):
+        if _already_running(5001):
+            sys.exit(0)
+        port = _pick_port(5001)
+    else:
+        port = int(os.environ.get("PORT", "5001"))
     _load_history()
-    port = int(os.environ.get("PORT", "5001"))
     print(f"\n  Website Intelligence  ->  http://127.0.0.1:{port}\n")
+    if installed and os.environ.get("WI_NO_BROWSER") != "1":
+        def _open():
+            import time
+            import webbrowser
+            time.sleep(1.2)
+            try:
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            except Exception:
+                pass
+        threading.Thread(target=_open, daemon=True).start()
     app.run(host="127.0.0.1", port=port, threaded=True, debug=False)

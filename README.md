@@ -53,16 +53,43 @@ Then open <http://127.0.0.1:5001> (or double-click **`Start.bat`** on Windows).
 - **History** — Internet Archive snapshot count, first/last seen, timeline.
 - **Export** — JSON, CSV, HTML. **Scan history** and **compare two scans**.
 
+## Deep intelligence (opt-in — passive OSINT)
+
+Tick **🛰️ Deep intelligence** to add a full reconnaissance layer, all from public
+sources (Certificate Transparency, DNS-over-HTTPS, Shodan's free InternetDB, public
+DNS blocklists, and what the site itself serves). Nothing authenticates, brute-forces
+or exploits. Where an exposure is found it is **reported masked**, so the owner can fix
+it — never used or stored.
+
+- **Subdomain discovery** — from CT logs (crt.sh) + DNS, resolved and live-checked, with staging / internal / mail / service classification.
+- **Relationship map** — an interactive OSINT graph linking the domain → subdomains → IPs → hosting → tracking identifiers → social → look-alike domains.
+- **Infrastructure map** — every IP → ASN / org / country, plus what else is hosted on each IP (shared-host view).
+- **Ports & known CVEs** — passive, from Shodan InternetDB: open ports, software (CPEs) and public CVEs per IP (no active scanning), with risky-port highlighting.
+- **Certificate history** — every SSL certificate ever issued (crt.sh), issuers and timeline.
+- **Deep DNS** — DNSSEC, MTA-STS, TLS-RPT, BIMI, CAA, an extended DKIM-selector sweep, and **subdomain-takeover** (dangling-CNAME) detection.
+- **Reputation** — the domain/mail IPs checked against public DNS blocklists.
+- **Look-alike domains** — generated typosquats resolved live; flags ones that can send email (phishing risk).
+- **Owner-research pivots** — GA / GTM / AdSense / Pixel IDs + a Shodan-style favicon hash, with links to find sibling sites.
+- **WordPress deep scan** — version, theme, plugins (with versions), public author accounts (REST), XML-RPC status.
+- **Technology versions → advisories** — outdated components matched to known-issue advisories/CVEs.
+- **Exposure reporting** — secrets in public code (masked), publicly listable cloud buckets, exposed config/state — reported for remediation.
+- **Trust & risk score** — a weighted legitimacy rating (domain age, HTTPS, reputation, exposures, CVEs, contactability) for spotting risky or fraudulent sites.
+
+Deep intelligence is slower (it queries several public services) and every check is
+isolated: any one can fail without affecting the rest of the report.
+
 ## How it's built
 
 - `intel.py` — low-level probes: HTTP (with redirect chain + timing), DNS-over-HTTPS, ASN (Team Cymru), SSL/TLS (via `cryptography`).
-- `analyzers.py` — technology fingerprints, SEO, security headers, cookies, robots/sitemap, crawler, inventories, web-archive history.
+- `analyzers.py` — technology fingerprints, SEO, security headers, cookies, robots/sitemap, crawler, inventories, web-archive history, plus WordPress scan, version→CVE advisories, and exposure reporting (secrets/cloud/config).
+- `recon.py` — deep intelligence: CT-log subdomains & certificate history, Shodan InternetDB ports/CVEs, infrastructure map, deep DNS + subdomain-takeover, typosquats, reputation, owner pivots (incl. favicon hash), trust score.
 - `scan.py` — runs every phase, streams progress, assembles the report + Website DNA, captures screenshots (Playwright).
 - `server.py` — Flask API (scan jobs, history, compare, export).
 - `static/index.html` — the single-page UI.
 
 All network calls are defensive: any single probe can fail without sinking the
 scan. Data sources used: Google DNS-over-HTTPS, rdap.org, Team Cymru (ASN),
-Internet Archive — all free and public.
+Internet Archive, Certificate Transparency (crt.sh), Shodan InternetDB, and public
+DNS blocklists — all free and public, no API keys required.
 
 Later this can be packaged as a Windows `.exe` the same way as the site cloner.

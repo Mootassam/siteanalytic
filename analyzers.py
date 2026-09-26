@@ -685,3 +685,199 @@ def _fmt_ts(ts: str) -> str:
         return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
     except Exception:
         return ts
+
+
+# --------------------------------------------------------------------------- #
+# WordPress deep scan (public endpoints only)
+# --------------------------------------------------------------------------- #
+def wordpress_scan(origin: str, html: str) -> dict:
+    is_wp = bool(re.search(r"/wp-content/|/wp-includes/|/wp-json/", html or "")) \
+        or "wordpress" in (html or "").lower()
+    if not is_wp:
+        return {"is_wordpress": False}
+    out = {"is_wordpress": True, "version": "", "users": [], "plugins": [], "theme": "",
+           "xmlrpc": None, "rest_users_exposed": False}
+    m = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']WordPress\s*([\d.]+)', html or "", re.I)
+    if m:
+        out["version"] = m.group(1)
+    if not out["version"]:
+        rss = fetch(origin + "/feed/", timeout=8)
+        mm = re.search(r"generator[^>]*>.*?wordpress[^\d]*([\d.]+)", rss.get("text", ""), re.I | re.S)
+        if mm:
+            out["version"] = mm.group(1)
+    plugins = {}
+    for m in re.finditer(r"/wp-content/plugins/([a-z0-9\-_]+)(?:[^\"'>]*?[?&]ver=([\d.]+))?", html or "", re.I):
+        name = m.group(1).lower()
+        if not plugins.get(name):
+            plugins[name] = m.group(2) or ""
+    out["plugins"] = [{"name": k, "version": v} for k, v in sorted(plugins.items())][:60]
+    mt = re.search(r"/wp-content/themes/([a-z0-9\-_]+)", html or "", re.I)
+    if mt:
+        out["theme"] = mt.group(1)
+    ru = fetch(origin + "/wp-json/wp/v2/users", timeout=8)
+    if ru["ok"] and ru["text"].strip().startswith("["):
+        try:
+            users = json.loads(ru["text"])
+            out["users"] = [{"name": u.get("name", ""), "slug": u.get("slug", "")}
+                            for u in users if isinstance(u, dict)][:50]
+            out["rest_users_exposed"] = bool(out["users"])
+        except Exception:
+            pass
+    if not out["users"]:
+        au = fetch(origin + "/?author=1", timeout=8, max_redirects=1)
+        for hop in au.get("redirects", []):
+            am = re.search(r"/author/([^/]+)/?", hop.get("to", ""))
+            if am:
+                out["users"] = [{"name": "", "slug": am.group(1)}]
+    xr = fetch(origin + "/xmlrpc.php", timeout=8)
+    body = (xr.get("text") or "").lower()
+    out["xmlrpc"] = ("xml-rpc server accepts post" in body) or xr["status"] == 405 or "methodresponse" in body
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Technology versions -> known-issue advisories (curated, honest)
+# --------------------------------------------------------------------------- #
+def _vtuple(v: str):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4]) if v else ()
+
+
+def _lt(a: str, b: str) -> bool:
+    ta, tb = _vtuple(a), _vtuple(b)
+    return bool(ta) and ta < tb
+
+
+CVE_DB = {
+    "jQuery": [("3.5.0", "XSS via jQuery.htmlPrefilter (CVE-2020-11022 / CVE-2020-11023)"),
+               ("1.9.0", "Multiple legacy XSS/selector issues — very outdated")],
+    "Bootstrap": [("3.4.1", "XSS in data-target/tooltip (CVE-2019-8331, CVE-2018-14040..14042)"),
+                  ("4.3.1", "XSS in tooltip/popover data-* attributes (CVE-2019-8331)")],
+    "Lodash": [("4.17.21", "Prototype pollution / command injection (CVE-2021-23337, CVE-2020-8203)")],
+    "AngularJS": [("1.8.0", "Legacy AngularJS 1.x — end of life, multiple XSS sinks")],
+    "Angular": [("1.8.0", "AngularJS 1.x is end-of-life")],
+    "Moment.js": [("2.29.4", "ReDoS / path traversal in older moment (CVE-2022-24785, CVE-2022-31129)")],
+    "Vue.js": [("2.7.0", "Older Vue 2 — check for known template advisories")],
+    "Chart.js": [("2.9.4", "Prototype pollution in older Chart.js")],
+}
+
+
+def tech_cve(techs: list[dict]) -> dict:
+    outdated = []
+    for t in techs:
+        v = t.get("version")
+        if not v:
+            continue
+        for fixed, advisory in CVE_DB.get(t["name"], []):
+            if _lt(v, fixed):
+                outdated.append({"name": t["name"], "version": v, "fixed_in": fixed, "advisory": advisory})
+                break
+    return {"outdated": outdated, "count": len(outdated),
+            "note": "Version detected from public asset URLs; confirm before acting."}
+
+
+# --------------------------------------------------------------------------- #
+# Exposed-secret reporting (masked) + cloud storage + config exposure.
+# Reports what a site publicly leaks so the OWNER can fix it. Findings are masked
+# and never used, validated or stored elsewhere.
+# --------------------------------------------------------------------------- #
+SECRET_PATTERNS = [
+    ("AWS access key", r"\bAKIA[0-9A-Z]{16}\b"),
+    ("Google API key", r"\bAIza[0-9A-Za-z\-_]{35}\b"),
+    ("Stripe secret key", r"\bsk_live_[0-9a-zA-Z]{20,40}\b"),
+    ("Stripe restricted key", r"\brk_live_[0-9a-zA-Z]{20,40}\b"),
+    ("Slack token", r"\bxox[baprs]-[0-9A-Za-z-]{10,60}\b"),
+    ("Slack webhook", r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"),
+    ("GitHub token", r"\bghp_[0-9A-Za-z]{36}\b"),
+    ("Twilio account SID", r"\bAC[0-9a-f]{32}\b"),
+    ("SendGrid key", r"\bSG\.[\w\-]{20,30}\.[\w\-]{30,50}\b"),
+    ("Mailgun key", r"\bkey-[0-9a-f]{32}\b"),
+    ("Private key block", r"-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP) PRIVATE KEY-----"),
+    ("JSON Web Token", r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{6,}\b"),
+    ("Firebase database URL", r"https://[a-z0-9\-]+\.firebaseio\.com"),
+]
+_SECRET_ALLOW = re.compile(r"pk_live_|pk_test_", re.I)
+CLOUD_BUCKET = re.compile(
+    r"https?://(?:([a-z0-9.\-]+)\.s3[.\-][a-z0-9.\-]*amazonaws\.com|s3[.\-][a-z0-9.\-]*amazonaws\.com/([a-z0-9.\-]+)|"
+    r"storage\.googleapis\.com/([a-z0-9.\-_]+)|([a-z0-9\-]+)\.blob\.core\.windows\.net|"
+    r"([a-z0-9\-]+)\.firebaseio\.com)", re.I)
+
+
+def _mask(s: str) -> str:
+    s = s.strip()
+    if len(s) <= 10:
+        return (s[:2] + "•" * max(0, len(s) - 2))
+    return s[:4] + "•" * 10 + s[-4:]
+
+
+def secret_scan(origin: str, html: str, script_urls: list[str], max_scripts: int = 8) -> dict:
+    texts = [("page HTML", html or "")]
+    internal = [s for s in script_urls if _registrable(_host(s)) == _registrable(_host(origin))]
+    for u in internal[:max_scripts]:
+        r = fetch(u, timeout=8, max_bytes=1_500_000)
+        if r["ok"] and r.get("text"):
+            texts.append((u, r["text"]))
+    findings, seen = [], set()
+    for where, txt in texts:
+        for label, pat in SECRET_PATTERNS:
+            for m in re.findall(pat, txt):
+                val = m if isinstance(m, str) else next((g for g in m if g), "")
+                if not val or _SECRET_ALLOW.search(val):
+                    continue
+                key = (label, val)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append({"type": label, "masked": _mask(val), "where": where[:120]})
+    return {"count": len(findings), "findings": findings[:60],
+            "note": "Reported so the owner can rotate/remove them. Values are masked; never used."}
+
+
+def cloud_storage(origin: str, html: str, assets: list[dict]) -> dict:
+    urls = " ".join([html or ""] + [a.get("url", "") for a in (assets or [])])
+    buckets = {}
+    for m in CLOUD_BUCKET.finditer(urls):
+        full = m.group(0)
+        name = next((g for g in m.groups() if g), "")
+        base = re.match(r"https?://[^/]+(?:/[a-z0-9.\-_]+)?", full, re.I)
+        buckets.setdefault(base.group(0) if base else full, name)
+    results = []
+    for base, name in list(buckets.items())[:15]:
+        prov = ("S3" if "amazonaws" in base else "GCS" if "googleapis" in base
+                else "Azure Blob" if "blob.core" in base else "Firebase" if "firebaseio" in base else "cloud")
+        listable = False
+        try:
+            r = fetch(base, timeout=8, max_bytes=4000)
+            body = (r.get("text") or "")
+            listable = ("ListBucketResult" in body or "<Contents>" in body
+                        or (prov == "Firebase" and r["status"] == 200 and body.strip() not in ("", "null")))
+        except Exception:
+            pass
+        results.append({"bucket": name or base, "url": base, "provider": prov, "public_listable": listable})
+    return {"count": len(results), "buckets": results, "any_public": any(b["public_listable"] for b in results)}
+
+
+CONFIG_PATHS = ["/config.js", "/config.json", "/app.config.js", "/env.js", "/.env.js",
+                "/appsettings.json", "/firebase-config.js", "/asset-manifest.json", "/graphql"]
+
+
+def exposed_config(origin: str) -> dict:
+    found = []
+    for path in CONFIG_PATHS:
+        r = fetch(origin + path, timeout=7, max_bytes=4000)
+        ct = r["headers"].get("Content-Type", "").lower()
+        body = (r.get("text") or "").strip()
+        if not r["ok"] or not body:
+            continue
+        if path == "/graphql":
+            if "__schema" in body.lower() or "must provide query" in body.lower() or "introspection" in body.lower():
+                found.append({"path": path, "type": "GraphQL endpoint responding",
+                              "note": "ensure introspection is disabled in production"})
+            continue
+        if "<!doctype html" in body.lower() or body.lower().startswith("<html"):
+            continue
+        interesting = re.search(r"apiKey|api_key|secret|token|password|firebase|database|"
+                                r"__INITIAL_STATE__|projectId|authDomain|bucket|endpoint", body, re.I)
+        if "json" in ct or "javascript" in ct or interesting:
+            found.append({"path": path, "type": ct.split(";")[0] or "config",
+                          "note": "public config/state — review for sensitive values" if interesting else "publicly readable"})
+    return {"count": len(found), "items": found}

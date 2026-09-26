@@ -4,3 +4,4 @@ scans/
 build/
 dist/
 installer_output/
+build_embed/
